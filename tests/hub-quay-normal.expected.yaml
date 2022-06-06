@@ -1,4 +1,13 @@
 ---
+# Source: quay/templates/rbac/quay-admin-sa.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: quay-admin-sa
+  namespace: quay-enterprise
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+---
 # Source: quay/templates/secret/secret.yaml
 apiVersion: v1
 kind: Secret
@@ -18,41 +27,122 @@ stringData:
     ALLOW_PULLS_WITHOUT_STRICT_LOGGING: false
     AUTHENTICATION_TYPE: Database
     DEFAULT_TAG_EXPIRATION: 2w
-    ENTERPRISE_LOGO_URL: /static/img/quay-horizontal-color.svg
+    ENTERPRISE_LOGO_URL: /static/img/RH_Logo_Quay_Black_UX-
     FEATURE_BUILD_SUPPORT: false
     FEATURE_DIRECT_LOGIN: true
     FEATURE_MAILING: false
-    REGISTRY_TITLE: Quay
+    REGISTRY_TITLE: Red Hat Quay
     REGISTRY_TITLE_SHORT: Quay
-    SETUP_COMPLETE: false
-    TAG_EXPIRATION_OPTIONS:
-    - 2w
     TEAM_RESYNC_STALE_TIME: 60m
     TESTING: false
 ---
-# Source: quay/templates/bridge/quay-integration.yaml
-apiVersion: quay.redhat.com/v1
-kind: QuayIntegration
+# Source: quay/templates/rbac/quay-admin-role.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
 metadata:
- name: quay
- annotations:
-   argocd.argoproj.io/sync-wave: "7"
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+  name: quay-admin-role
+rules:
+  - apiGroups:
+      - quay.redhat.com
+    resources:
+      - quayregistries
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+      - create
+      - list
+---
+# Source: quay/templates/rbac/quay-admin-rolebinding.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: quay-admin-binding
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: quay-admin-role
+subjects:
+  - kind: ServiceAccount
+    name: quay-admin-sa
+    namespace: quay-enterprise
+---
+# Source: quay/templates/quayRegistry/job-enable-quay-api.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "15"
+  name: enable-quay-api
+  namespace: quay-enterprise
 spec:
- clusterID: openshift
- credentialsSecret:
-   name: quay-integration
-   namespace: openshift-operators
- insecureRegistry: false
- quayHostname: https://local-registry-quay-quay-enterprise.apps.wh-hub.blueprints.rhecoeng.com
+  template:
+    spec:
+      containers: 
+      - image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+        command:
+        - /bin/bash
+        - -c
+        - |
+          # Invoke API and add quay user to the API - initiates API
+          JSONTOKEN=$(curl -X POST -k  https://quay-registry-quay-quay-enterprise.hub.example.com/api/v1/user/initialize --header 'Content-Type: application/json' --data '{ "username": "quayadmin", "password":"quayadmin123", "email": "quayadmin@example.com", "access_token": true}') && \
+          oc create secret generic quay-temp-token --from-literal=token=$JSONTOKEN
+          # Now extract the token and store in the Quay Integration secret in openshift-operators namespace
+          TOKEN=$(oc extract secret/quay-temp-token --keys=token --to=- | grep access_token | cut -d : -f2 | awk -F\" '{print $2}') && \
+          oc create secret -n openshift-operators generic quay-integration --from-literal=token=$TOKEN
+        name: quay-api-enablement
+      dnsPolicy: ClusterFirst
+      activeDeadlineSeconds: 900
+      restartPolicy: Never
+      serviceAccountName: quay-admin-sa
+      terminationGracePeriodSeconds: 60
+---
+# Source: quay/templates/quayRegistry/job-wait-on-quay-app-deploy.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "6"
+  name: wait-for-quay-app-deploy
+  namespace: quay-enterprise
+spec:
+  template:
+    spec:
+      containers: 
+      - image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+        command:
+        - /bin/bash
+        - -c
+        - |
+          # wait for the operator QuayRegistry CR to be available
+          oc wait QuayRegistry quay-registry --for=condition=Available=true
+        name: wait-for-quay-app
+      dnsPolicy: ClusterFirst
+      activeDeadlineSeconds: 900
+      restartPolicy: Never
+      serviceAccountName: quay-admin-sa
+      terminationGracePeriodSeconds: 60
 ---
 # Source: quay/templates/quayRegistry/registry.yaml
 apiVersion: quay.redhat.com/v1
 kind: QuayRegistry
 metadata:
-  name: local-registry
+  name: quay-registry
   namespace: quay-enterprise
   annotations:
-    argocd.argoproj.io/sync-wave: "6"
+    argocd.argoproj.io/sync-wave: "4"
 spec:
   components:
     - kind: clair

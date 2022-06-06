@@ -3,11 +3,11 @@ kind: QuayIntegration
 metadata:
  name: quay
  annotations:
-   argocd.argoproj.io/sync-wave: "7"
+   argocd.argoproj.io/sync-wave: "8"
 spec:
  clusterID: openshift
  credentialsSecret:
    name: quay-integration
    namespace: openshift-operators
  insecureRegistry: false
- quayHostname: https://local-registry-quay-quay-enterprise.apps.wh-hub.blueprints.rhecoeng.com
+ quayHostname: https://quay-registry-quay-quay-enterprise.{{ .Values.global.hubClusterDomain }}
